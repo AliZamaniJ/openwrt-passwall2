@@ -29,8 +29,14 @@ grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall
 grep -q 'failover_backup_node' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'candidate.type == "Xray" and self_contained' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'backup_limit = 9' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
-[ "$(grep -c 'start_priority_failover' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh")" -eq 2 ]
+[ "$(grep -c 'start_priority_failover' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh")" -eq 3 ]
 ! grep -q 'start_priority_failove$' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'json_add_string "failover_runtime_dir" "${TMP_PATH}/failover"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'priority_failover_profile_exists "$failover_runtime_prefix"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'start_priority_failover "$failover_runtime_prefix" 0' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'stop_socks_runtime "$flag"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/socks_auto_switch.sh"
+grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
 
 TCP_LIMIT=$(lua "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/helper_dnsmasq.lua" get_tcp_connection_limit)
 case "$TCP_LIMIT" in

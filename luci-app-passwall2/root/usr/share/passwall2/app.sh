@@ -360,6 +360,7 @@ run_socks() {
 		log_file="/dev/null"
 	fi
 	local type=$(echo $(config_n_get $node type) | tr 'A-Z' 'a-z')
+	local protocol=$(config_n_get $node protocol)
 	local remarks=$(config_n_get $node remarks)
 	local server_host=$(config_n_get $node address)
 	local server_port=$(config_n_get $node port)
@@ -381,7 +382,6 @@ run_socks() {
 	fi
 
 	if [ "$type" == "sing-box" ] || [ "$type" == "xray" ]; then
-		local protocol=$(config_n_get $node protocol)
 		if [ "$protocol" == "_balancing" ] || [ "$protocol" == "_failover" ] || [ "$protocol" == "_shunt" ] || [ "$protocol" == "_iface" ] || [ "$protocol" == "_urltest" ]; then
 			unset error_msg
 		fi
@@ -432,6 +432,7 @@ run_socks() {
 		[ -z "$no_run" ] && ln_run ${QUEUE_RUN} "$SINGBOX_BIN" "sing-box" /dev/null run -c "$config_file"
 	;;
 	xray)
+		local failover_runtime_prefix
 		[ "$http_port" != "0" ] && {
 			http_flag=1
 			config_file="${config_file//SOCKS/HTTP_SOCKS}"
@@ -449,9 +450,20 @@ run_socks() {
 		json_add_string "direct_dns_udp_port" "${DIRECT_DNS_UDP_PORT}"
 		json_add_string "direct_dns_udp_server" "${DIRECT_DNS_UDP_SERVER}"
 		json_add_string "direct_dns_query_strategy" "${DIRECT_DNS_QUERY_STRATEGY}"
+		if [ -z "$no_run" ]; then
+			failover_runtime_prefix="SOCKS_${flag}_"
+			json_add_string "failover_runtime_dir" "${TMP_PATH}/failover"
+		fi
 		local _json_arg="$(json_dump)"
 		lua $UTIL_XRAY gen_config "${_json_arg}" > $config_file
 		[ -z "$no_run" ] && ln_run ${QUEUE_RUN} "$XRAY_BIN" "xray" $log_file run -c "$config_file"
+		if [ -n "$failover_runtime_prefix" ] && [ "${QUEUE_RUN:-0}" = "0" ] && priority_failover_profile_exists "$failover_runtime_prefix"; then
+			if ! start_priority_failover "$failover_runtime_prefix" 0 || ! wait_priority_failover "$failover_runtime_prefix"; then
+				log_i18n 1 "Priority failover initialization failed for Socks service [%s]." "$flag"
+				stop_socks_runtime "$flag"
+				return 1
+			fi
+		fi
 	;;
 	naiveproxy)
 		json_add_string "local_addr" "${bind}"
@@ -530,26 +542,36 @@ run_socks() {
 	[ -z "$no_run" ] && [ "${server_host}" != "127.0.0.1" ] && [ "$type" != "sing-box" ] && [ "$type" != "xray" ] && echo "${node}" >> $TMP_PATH/direct_node_list
 }
 
+stop_socks_runtime() {
+	local flag="$1"
+	[ -n "$flag" ] || return 0
+
+	local prefix pf filename
+	# Kill the SS plugin process.
+	for prefix in "" "HTTP_"; do
+		pf="$TMP_PATH/${prefix}SOCKS_${flag}_plugin.pid"
+		[ -s "$pf" ] && kill -9 "$(head -n1 "$pf")" >/dev/null 2>&1
+	done
+
+	# Remove monitor entries before stopping processes so they cannot be restarted.
+	for filename in "${TMP_SCRIPT_FUNC_PATH}"/*; do
+		[ -f "$filename" ] || continue
+		grep -Fq "SOCKS_${flag}" "$filename" && rm -f "$filename"
+	done
+
+	busybox pgrep -af "$TMP_BIN_PATH" | awk -v P1="SOCKS_${flag}" 'BEGIN{IGNORECASE=1}$0~P1 && !/acl\/|acl_/{print $1}' | xargs kill -9 >/dev/null 2>&1
+	for prefix in "" "HTTP_" "HTTP2"; do
+		rm -rf "$TMP_PATH/${prefix}SOCKS_${flag}"*
+	done
+	rm -rf "${TMP_PATH}/failover/SOCKS_${flag}_"*
+	rm -f "${TMP_BIN_PATH}/priority_failover_SOCKS_${flag}_"*
+}
+
 socks_node_switch() {
 	local flag new_node
 	eval_set_val $@
 	[ -n "$flag" ] && [ -n "$new_node" ] && {
-		local prefix pf filename
-		# Kill the SS plugin process
-		for prefix in "" "HTTP_"; do
-			pf="$TMP_PATH/${prefix}SOCKS_${flag}_plugin.pid"
-			[ -s "$pf" ] && kill -9 "$(head -n1 "$pf")" >/dev/null 2>&1
-		done
-
-		busybox pgrep -af "$TMP_BIN_PATH" | awk -v P1="${flag}" 'BEGIN{IGNORECASE=1}$0~P1 && !/acl\/|acl_/{print $1}' | xargs kill -9 >/dev/null 2>&1
-		for prefix in "" "HTTP_" "HTTP2"; do
-			rm -rf "$TMP_PATH/${prefix}SOCKS_${flag}"*
-		done
-
-		for filename in $(ls ${TMP_SCRIPT_FUNC_PATH}); do
-			cmd=$(cat ${TMP_SCRIPT_FUNC_PATH}/${filename})
-			[ -n "$(echo $cmd | grep "${flag}")" ] && rm -f ${TMP_SCRIPT_FUNC_PATH}/${filename}
-		done
+		stop_socks_runtime "$flag"
 		local bind_local=$(config_n_get $flag bind_local 0)
 		local bind="0.0.0.0"
 		[ "$bind_local" = "1" ] && bind="127.0.0.1"
@@ -561,7 +583,10 @@ socks_node_switch() {
 		local http_port=$(config_n_get $flag http_port 0)
 		local http_config_file="HTTP2SOCKS_${flag}.json"
 		LOG_FILE="/dev/null"
-		run_socks flag=$flag node=$new_node bind=$bind socks_port=$port config_file=$config_file http_port=$http_port http_config_file=$http_config_file log_file=$log_file
+		run_socks flag=$flag node=$new_node bind=$bind socks_port=$port config_file=$config_file http_port=$http_port http_config_file=$http_config_file log_file=$log_file || {
+			stop_socks_runtime "$flag"
+			return 1
+		}
 		set_cache_var "socks_${flag}" "$new_node"
 		local USE_TABLES=$(get_cache_var "USE_TABLES")
 		[ -n "$USE_TABLES" ] && source $APP_PATH/${USE_TABLES}.sh filter_direct_node_list
@@ -752,26 +777,50 @@ run_global_dnsmasq() {
 	fi
 }
 
-start_priority_failover() {
-	local config_file runtime_name
-	[ -d "${TMP_PATH}/failover" ] || return 0
-	for config_file in "${TMP_PATH}/failover"/*.json; do
-		[ -s "$config_file" ] || continue
-		runtime_name=$(basename "$config_file" .json)
-		ln_run 1 "$APP_PATH/priority_failover.sh" "priority_failover_${runtime_name}" "${TMP_PATH}/failover/${runtime_name}.log" "$config_file"
+priority_failover_profile_exists() {
+	local runtime_prefix="$1"
+	local config_file
+	[ -n "$runtime_prefix" ] && [ -d "${TMP_PATH}/failover" ] || return 1
+	for config_file in "${TMP_PATH}/failover/${runtime_prefix}"*.json; do
+		[ -s "$config_file" ] && return 0
 	done
+	return 1
+}
+
+start_priority_failover() {
+	local runtime_prefix="${1:-}"
+	local queue_run="${2:-1}"
+	local config_file runtime_name found=0
+	[ -d "${TMP_PATH}/failover" ] || {
+		[ -z "$runtime_prefix" ] && return 0
+		return 1
+	}
+	for config_file in "${TMP_PATH}/failover/${runtime_prefix}"*.json; do
+		[ -s "$config_file" ] || continue
+		found=1
+		runtime_name=$(basename "$config_file" .json)
+		ln_run "$queue_run" "$APP_PATH/priority_failover.sh" "priority_failover_${runtime_name}" "${TMP_PATH}/failover/${runtime_name}.log" "$config_file"
+	done
+	[ -z "$runtime_prefix" ] || [ "$found" -eq 1 ]
 }
 
 wait_priority_failover() {
-	local config_file ready_file pending waited=0
-	[ -d "${TMP_PATH}/failover" ] || return 0
+	local runtime_prefix="${1:-}"
+	local config_file ready_file pending found waited=0
+	[ -d "${TMP_PATH}/failover" ] || {
+		[ -z "$runtime_prefix" ] && return 0
+		return 1
+	}
 	while [ "$waited" -lt 12 ]; do
 		pending=0
-		for config_file in "${TMP_PATH}/failover"/*.json; do
+		found=0
+		for config_file in "${TMP_PATH}/failover/${runtime_prefix}"*.json; do
 			[ -s "$config_file" ] || continue
+			found=1
 			ready_file="${config_file%.json}.ready"
 			[ -f "$ready_file" ] || pending=$((pending + 1))
 		done
+		[ -n "$runtime_prefix" ] && [ "$found" -eq 0 ] && return 1
 		[ "$pending" -eq 0 ] && return 0
 		waited=$((waited + 1))
 		sleep 1
