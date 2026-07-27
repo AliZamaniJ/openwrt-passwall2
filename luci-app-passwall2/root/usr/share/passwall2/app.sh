@@ -992,6 +992,7 @@ run_ipset_chinadns_ng() {
 run_ipset_dnsmasq() {
 	local listen_port server_dns ipset nftset cache_size dns_forward_max config_file
 	eval_set_val $@
+	local tcp_max_connections=$(lua $APP_PATH/helper_dnsmasq.lua get_tcp_connection_limit)
 	cat <<-EOF > $config_file
 		port=${listen_port}
 		no-poll
@@ -999,6 +1000,7 @@ run_ipset_dnsmasq() {
 		strict-order
 		cache-size=${cache_size:-0}
 		dns-forward-max=${dns_forward_max:-1000}
+		max-tcp-connections=${tcp_max_connections:-20}
 	EOF
 	for i in $(echo ${server_dns} | sed "s#,# #g"); do
 		echo "server=${i}" >> $config_file
