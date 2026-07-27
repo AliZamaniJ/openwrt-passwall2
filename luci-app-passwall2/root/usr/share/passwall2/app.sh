@@ -73,14 +73,16 @@ check_run_environment() {
 run_xray() {
 	local flag node redir_port tcp_proxy_way socks_address socks_port socks_username socks_password http_address http_port http_username http_password
 	local dns_listen_port direct_dns_query_strategy remote_dns_protocol remote_dns_udp_server remote_dns_tcp_server remote_dns_doh remote_dns_client_ip remote_dns_detour remote_fakedns remote_dns_query_strategy dns_cache
-	local loglevel log_file config_file
+	local loglevel log_file config_file failover_runtime_dir
 	eval_set_val $@
+	[ -n "$failover_runtime_dir" ] || failover_runtime_dir="${TMP_PATH}/failover"
 	node_protocol=$(config_n_get $node protocol)
 	[ -n "$log_file" ] || local log_file="/dev/null"
 	[ -z "$loglevel" ] && local loglevel=$(config_t_get global loglevel "warning")
 
 	json_init
 	json_add_string "loglevel" "${loglevel}"
+	json_add_string "failover_runtime_dir" "${failover_runtime_dir}"
 
 	[ -n "$flag" ] && {
 		busybox pgrep -af "$TMP_BIN_PATH" | awk -v P1="${flag}" 'BEGIN{IGNORECASE=1}$0~P1{print $1}' | xargs kill -9 >/dev/null 2>&1
@@ -750,6 +752,34 @@ run_global_dnsmasq() {
 	fi
 }
 
+start_priority_failover() {
+	local config_file runtime_name
+	[ -d "${TMP_PATH}/failover" ] || return 0
+	for config_file in "${TMP_PATH}/failover"/*.json; do
+		[ -s "$config_file" ] || continue
+		runtime_name=$(basename "$config_file" .json)
+		ln_run 1 "$APP_PATH/priority_failover.sh" "priority_failover_${runtime_name}" "${TMP_PATH}/failover/${runtime_name}.log" "$config_file"
+	done
+}
+
+wait_priority_failover() {
+	local config_file ready_file pending waited=0
+	[ -d "${TMP_PATH}/failover" ] || return 0
+	while [ "$waited" -lt 12 ]; do
+		pending=0
+		for config_file in "${TMP_PATH}/failover"/*.json; do
+			[ -s "$config_file" ] || continue
+			ready_file="${config_file%.json}.ready"
+			[ -f "$ready_file" ] || pending=$((pending + 1))
+		done
+		[ "$pending" -eq 0 ] && return 0
+		waited=$((waited + 1))
+		sleep 1
+	done
+	log_i18n 2 "Priority failover initialization timed out."
+	return 1
+}
+
 start_socks() {
 	[ "$SOCKS_ENABLED" = "1" ] && {
 		local ids=$(uci show $CONFIG | grep "=socks" | awk -F '.' '{print $2}' | awk -F '=' '{print $1}')
@@ -1162,6 +1192,7 @@ start() {
 		sleep 2
 	}
 	mkdir -p /tmp/etc /tmp/log $TMP_PATH $TMP_BIN_PATH $TMP_SCRIPT_FUNC_PATH $TMP_ROUTE_PATH $TMP_ACL_PATH $TMP_PATH2
+	rm -rf "${TMP_PATH}/failover"
 	get_config
 	export V2RAY_LOCATION_ASSET=$(config_t_get global_rules v2ray_location_asset "/usr/share/v2ray/")
 	export XRAY_LOCATION_ASSET=$V2RAY_LOCATION_ASSET
@@ -1190,6 +1221,12 @@ start() {
 	[ "$ENABLED_DEFAULT_ACL" == 1 ] && run_global
 	run_front_dns
 	run_global_dnsmasq
+	start_priority_failover
+	run_process_queue
+	wait_priority_failover || {
+		stop
+		return 1
+	}
 	[ -n "$USE_TABLES" ] && source $APP_PATH/${USE_TABLES}.sh start
 	set_cache_var "USE_TABLES" "$USE_TABLES"
 	if [ "$ENABLED_DEFAULT_ACL" == 1 ] || [ "$ENABLED_ACLS" == 1 ]; then
@@ -1202,7 +1239,6 @@ start() {
 			sysctl -w net.bridge.bridge-nf-call-ip6tables=0 >/dev/null 2>&1
 		}
 	fi
-	run_process_queue
 	start_crontab
 	log_i18n 0 "Running complete!"
 	echolog "\n"
