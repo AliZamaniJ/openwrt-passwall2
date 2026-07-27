@@ -32,6 +32,7 @@ grep -q 'backup_limit = 9' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/pas
 [ "$(grep -c 'start_priority_failover' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh")" -eq 3 ]
 ! grep -q 'start_priority_failove$' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'json_add_string "failover_runtime_dir" "${TMP_PATH}/failover"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
+grep -q 'json_add_string "xray_config_file" "${config_file}"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'priority_failover_profile_exists "$failover_runtime_prefix"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'start_priority_failover "$failover_runtime_prefix" 0' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'stop_socks_runtime "$flag"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
@@ -135,7 +136,8 @@ UCI_TEST_SECTION=""
 
 API_PORT=$(get_new_port 32180 tcp)
 PROBE_PORT=$(get_new_port $((API_PORT + 1)) tcp)
-HTTP_PORT=$(get_new_port $((PROBE_PORT + 1)) tcp)
+MAIN_PORT=$(get_new_port $((PROBE_PORT + 1)) tcp)
+HTTP_PORT=$(get_new_port $((MAIN_PORT + 1)) tcp)
 XRAY_CONFIG="$WORK_DIR/xray.json"
 RUNTIME_CONFIG="$WORK_DIR/smoke.json"
 
@@ -153,7 +155,8 @@ cat > "$XRAY_CONFIG" <<EOF
   "log": {"loglevel": "warning"},
   "api": {"tag": "api", "listen": "127.0.0.1:$API_PORT", "services": ["RoutingService"]},
   "inbounds": [
-    {"tag": "probe-in", "listen": "127.0.0.1", "port": $PROBE_PORT, "protocol": "socks", "settings": {"auth": "noauth", "udp": false}}
+    {"tag": "probe-in", "listen": "127.0.0.1", "port": $PROBE_PORT, "protocol": "socks", "settings": {"auth": "noauth", "udp": false}},
+    {"tag": "main-in", "listen": "127.0.0.1", "port": $MAIN_PORT, "protocol": "socks", "settings": {"auth": "noauth", "udp": false}}
   ],
   "outbounds": [
     {"tag": "direct", "protocol": "freedom"},
@@ -161,11 +164,12 @@ cat > "$XRAY_CONFIG" <<EOF
   ],
   "routing": {
     "balancers": [
-      {"tag": "smoke-main", "selector": ["direct"], "strategy": {"type": "random"}},
+      {"tag": "smoke-main", "selector": ["blackhole"], "strategy": {"type": "random"}},
       {"tag": "smoke-probe", "selector": ["direct"], "strategy": {"type": "random"}}
     ],
     "rules": [
-      {"inboundTag": ["probe-in"], "balancerTag": "smoke-probe"}
+      {"inboundTag": ["probe-in"], "balancerTag": "smoke-probe"},
+      {"inboundTag": ["main-in"], "balancerTag": "smoke-main"}
     ]
   }
 }
@@ -174,6 +178,7 @@ EOF
 cat > "$RUNTIME_CONFIG" <<EOF
 {
   "id": "smoke",
+  "xray_config_file": "$XRAY_CONFIG",
   "api_port": $API_PORT,
   "probe_port": $PROBE_PORT,
   "main_balancer": "smoke-main",
@@ -219,8 +224,34 @@ done
 [ "${state:-}" = "backup" ]
 [ "${current:-}" = "working" ]
 code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 3 --max-time 6 \
-	--proxy "socks5h://127.0.0.1:${PROBE_PORT}" -w '%{http_code}' \
+	--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
 	"http://127.0.0.1:$HTTP_PORT/cgi-bin/health")
 [ "$code" = "204" ]
+
+switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
+kill "$XRAY_PID"
+wait "$XRAY_PID" 2>/dev/null || true
+XRAY_PID=""
+sleep 1
+"$XRAY_BIN" run -c "$XRAY_CONFIG" >"$WORK_DIR/xray-restarted.log" 2>&1 &
+XRAY_PID=$!
+
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+	reason=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.reason' 2>/dev/null || true)
+	code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 1 --max-time 2 \
+		--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
+		"http://127.0.0.1:$HTTP_PORT/cgi-bin/health" 2>/dev/null || true)
+	[ "$reason" = "xray-recovered" ] && [ "$code" = "204" ] && break
+	attempt=$((attempt + 1))
+	sleep 1
+done
+
+[ "$reason" = "xray-recovered" ]
+[ "$code" = "204" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.state')" = "backup" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.current_id')" = "working" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')" = "$switched_at" ]
+kill -0 "$SUPERVISOR_PID"
 
 echo "priority failover smoke test passed"

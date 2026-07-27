@@ -83,6 +83,7 @@ run_xray() {
 	json_init
 	json_add_string "loglevel" "${loglevel}"
 	json_add_string "failover_runtime_dir" "${failover_runtime_dir}"
+	json_add_string "xray_config_file" "${config_file}"
 
 	[ -n "$flag" ] && {
 		busybox pgrep -af "$TMP_BIN_PATH" | awk -v P1="${flag}" 'BEGIN{IGNORECASE=1}$0~P1{print $1}' | xargs kill -9 >/dev/null 2>&1
@@ -453,6 +454,7 @@ run_socks() {
 		if [ -z "$no_run" ]; then
 			failover_runtime_prefix="SOCKS_${flag}_"
 			json_add_string "failover_runtime_dir" "${TMP_PATH}/failover"
+			json_add_string "xray_config_file" "${config_file}"
 		fi
 		local _json_arg="$(json_dump)"
 		lua $UTIL_XRAY gen_config "${_json_arg}" > $config_file

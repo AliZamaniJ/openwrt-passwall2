@@ -883,6 +883,7 @@ function gen_config(var)
 	local dns_cache = var["dns_cache"]
 	local no_run = var["no_run"]
 	local failover_runtime_dir = var["failover_runtime_dir"]
+	local xray_config_file = var["xray_config_file"]
 	local runtime_flag = flag
 
 	local dns_domain_rules = {}
@@ -1266,6 +1267,7 @@ function gen_config(var)
 
 		failover_profiles[#failover_profiles + 1] = {
 			id = failover_id,
+			xray_config_file = xray_config_file,
 			api_port = failover_api_port,
 			probe_port = probe_port,
 			main_balancer = main_balancer_tag,

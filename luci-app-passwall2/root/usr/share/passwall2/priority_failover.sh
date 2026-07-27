@@ -16,6 +16,7 @@ load_config() {
 	json_cleanup
 	json_load "$(cat "$CONFIG_FILE")" || return 1
 	json_get_var FAILOVER_ID id
+	json_get_var XRAY_CONFIG_FILE xray_config_file
 	json_get_var API_PORT api_port
 	json_get_var PROBE_PORT probe_port
 	json_get_var MAIN_BALANCER main_balancer
@@ -51,6 +52,12 @@ override_balancer() {
 	local balancer="$1"
 	local outbound="$2"
 	"$XRAY_BIN" api bo --server="127.0.0.1:${API_PORT}" -b "$balancer" "$outbound" >/dev/null 2>&1
+}
+
+get_core_pid() {
+	[ -n "$XRAY_CONFIG_FILE" ] || return 1
+	busybox pgrep -af 'run -c' 2>/dev/null | awk -v config="$XRAY_CONFIG_FILE" \
+		'index($0, "run -c " config) { print $1; exit }'
 }
 
 write_state() {
@@ -168,6 +175,7 @@ restore_previous_state() {
 }
 
 load_config || exit 1
+[ -n "$XRAY_CONFIG_FILE" ] || exit 1
 
 CURRENT_ID="$PRIMARY_ID"
 CURRENT_TAG="$PRIMARY_TAG"
@@ -196,11 +204,30 @@ else
 	write_state "supervisor-restart"
 	log_event "state=$STATE node=$CURRENT_ID reason=supervisor-restart"
 fi
+CORE_PID="$(get_core_pid)"
+[ -n "$CORE_PID" ] || exit 1
 touch "$READY_FILE"
 
 trap 'rm -f "$READY_FILE"; exit 0' INT TERM EXIT
 
 while true; do
+	current_core_pid="$(get_core_pid)"
+	if [ -z "$current_core_pid" ]; then
+		sleep 2
+		continue
+	fi
+	if [ "$current_core_pid" != "$CORE_PID" ]; then
+		if ! override_balancer "$MAIN_BALANCER" "$CURRENT_TAG"; then
+			sleep 2
+			continue
+		fi
+		CORE_PID="$current_core_pid"
+		ACTIVE_FAILURES=0
+		RECOVERY_COUNT=0
+		write_state "xray-recovered"
+		log_event "state=$STATE node=$CURRENT_ID reason=xray-recovered"
+	fi
+
 	if [ "$STATE" = "all-down" ] || [ "$STATE" = "direct-fallback" ]; then
 		candidate="$(find_healthy_candidate "")"
 		if [ -n "$candidate" ]; then
