@@ -809,11 +809,12 @@ start_priority_failover() {
 wait_priority_failover() {
 	local runtime_prefix="${1:-}"
 	local config_file ready_file pending found waited=0
+	local ready_timeout=30
 	[ -d "${TMP_PATH}/failover" ] || {
 		[ -z "$runtime_prefix" ] && return 0
 		return 1
 	}
-	while [ "$waited" -lt 12 ]; do
+	while [ "$waited" -lt "$ready_timeout" ]; do
 		pending=0
 		found=0
 		for config_file in "${TMP_PATH}/failover/${runtime_prefix}"*.json; do
