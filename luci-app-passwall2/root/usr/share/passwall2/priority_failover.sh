@@ -28,6 +28,7 @@ load_config() {
 	json_get_var CHECK_INTERVAL check_interval
 	json_get_var CONNECT_TIMEOUT connect_timeout
 	json_get_var FAILURE_THRESHOLD failure_threshold
+	json_get_var MINIMUM_FAILURE_DURATION minimum_failure_duration
 	json_get_var RECOVERY_INTERVAL recovery_interval
 	json_get_var RECOVERY_SUCCESSES recovery_successes
 	json_get_var MINIMUM_DWELL minimum_dwell
@@ -37,6 +38,7 @@ load_config() {
 	CHECK_INTERVAL=${CHECK_INTERVAL:-20}
 	CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-3}
 	FAILURE_THRESHOLD=${FAILURE_THRESHOLD:-2}
+	MINIMUM_FAILURE_DURATION=${MINIMUM_FAILURE_DURATION:-10}
 	RECOVERY_INTERVAL=${RECOVERY_INTERVAL:-300}
 	RECOVERY_SUCCESSES=${RECOVERY_SUCCESSES:-2}
 	MINIMUM_DWELL=${MINIMUM_DWELL:-600}
@@ -62,8 +64,10 @@ get_core_pid() {
 
 write_state() {
 	local reason="$1"
-	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s}\n' \
-		"$FAILOVER_ID" "$STATE" "$CURRENT_ID" "$CURRENT_TAG" "$reason" "$SWITCHED_AT" > "$STATE_FILE"
+	STATE_REASON="$reason"
+	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s,"failure_count":%s,"first_failure_at":%s}\n' \
+		"$FAILOVER_ID" "$STATE" "$CURRENT_ID" "$CURRENT_TAG" "$reason" "$SWITCHED_AT" \
+		"${ACTIVE_FAILURES:-0}" "${FIRST_FAILURE_AT:-0}" > "$STATE_FILE"
 }
 
 set_main() {
@@ -71,36 +75,102 @@ set_main() {
 	local node_tag="$2"
 	local state="$3"
 	local reason="$4"
+	local previous_id="$CURRENT_ID"
+	local previous_failures="${ACTIVE_FAILURES:-0}"
+	local failure_started="${FIRST_FAILURE_AT:-0}"
 	override_balancer "$MAIN_BALANCER" "$node_tag" || return 1
 	CURRENT_ID="$node_id"
 	CURRENT_TAG="$node_tag"
 	STATE="$state"
 	SWITCHED_AT="$(date +%s)"
 	ACTIVE_FAILURES=0
+	FIRST_FAILURE_AT=0
 	RECOVERY_COUNT=0
 	write_state "$reason"
-	log_event "state=$STATE node=$CURRENT_ID reason=$reason"
+	log_event "state=$STATE node=$CURRENT_ID previous_node=$previous_id reason=$reason failure_count=$previous_failures first_failure_at=$failure_started"
 }
 
 probe_url() {
-	local url="$1"
-	local code
-	code="$(/usr/bin/curl -o /dev/null -sS -L \
+	local node_id="$1"
+	local url="$2"
+	local result curl_exit code remainder time_connect time_appconnect time_tls time_total
+	result="$(/usr/bin/curl -o /dev/null -sS -L \
 		--connect-timeout "$CONNECT_TIMEOUT" \
 		--max-time "$((CONNECT_TIMEOUT + 3))" \
 		--proxy "socks5h://127.0.0.1:${PROBE_PORT}" \
-		-w '%{http_code}' "$url" 2>/dev/null)"
+		-w '%{http_code}|%{time_connect}|%{time_appconnect}|%{time_total}' "$url" 2>/dev/null)"
+	curl_exit=$?
+	code=${result%%|*}
+	remainder=${result#*|}
+	time_connect=${remainder%%|*}
+	remainder=${remainder#*|}
+	time_appconnect=${remainder%%|*}
+	time_total=${remainder#*|}
 	case "$code" in
 		2??) return 0 ;;
-		*) return 1 ;;
+		*)
+			time_tls="$(awk -v appconnect="${time_appconnect:-0}" -v connect="${time_connect:-0}" 'BEGIN { duration = appconnect - connect; if (duration < 0) duration = 0; printf "%.6f", duration }')"
+			log_event "reason=probe-endpoint-failed node=$node_id url=$url curl_exit=$curl_exit http_code=${code:-000} time_connect=${time_connect:-0} time_tls=${time_tls:-0} time_total=${time_total:-0}"
+			return 1
+			;;
 	esac
 }
 
 probe_tag() {
-	local node_tag="$1"
-	override_balancer "$PROBE_BALANCER" "$node_tag" || return 1
-	probe_url "$PRIMARY_URL" && return 0
-	probe_url "$SECONDARY_URL"
+	local node_id="$1"
+	local node_tag="$2"
+	if ! override_balancer "$PROBE_BALANCER" "$node_tag"; then
+		log_event "reason=node-failed node=$node_id phase=probe-balancer-override"
+		return 1
+	fi
+	probe_url "$node_id" "$PRIMARY_URL" && return 0
+	probe_url "$node_id" "$SECONDARY_URL"
+}
+
+wan_available() {
+	local route device gateway carrier
+	WAN_DEVICE=""
+	WAN_GATEWAY=""
+	WAN_DETAIL=""
+	route="$(ip -4 route show default 2>/dev/null | sed -n '1p')"
+	if [ -z "$route" ]; then
+		WAN_DETAIL="no-default-route"
+		return 1
+	fi
+
+	set -- $route
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			dev)
+				shift
+				device="$1"
+				;;
+			via)
+				shift
+				gateway="$1"
+				;;
+		esac
+		shift
+	done
+	WAN_DEVICE="$device"
+	WAN_GATEWAY="$gateway"
+	if [ -z "$device" ]; then
+		WAN_DETAIL="no-default-device"
+		return 1
+	fi
+	if [ -r "/sys/class/net/${device}/carrier" ]; then
+		carrier="$(cat "/sys/class/net/${device}/carrier" 2>/dev/null)"
+		if [ "$carrier" != "1" ]; then
+			WAN_DETAIL="carrier-down"
+			return 1
+		fi
+	fi
+	if [ -n "$gateway" ] && ! ping -c 1 -W 1 "$gateway" >/dev/null 2>&1; then
+		WAN_DETAIL="gateway-unreachable"
+		return 1
+	fi
+	WAN_DETAIL="available"
+	return 0
 }
 
 candidate_tag() {
@@ -134,7 +204,7 @@ find_healthy_candidate() {
 		json_get_var node_tag tag
 		json_select ..
 		[ "$node_id" = "$skip_id" ] && continue
-		if probe_tag "$node_tag"; then
+		if probe_tag "$node_id" "$node_tag"; then
 			json_select ..
 			printf '%s|%s' "$node_id" "$node_tag"
 			return 0
@@ -185,9 +255,11 @@ CURRENT_TAG="$PRIMARY_TAG"
 STATE="primary"
 SWITCHED_AT="$(date +%s)"
 ACTIVE_FAILURES=0
+FIRST_FAILURE_AT=0
 RECOVERY_COUNT=0
 LAST_RECOVERY_CHECK=0
 BACKOFF_INDEX=0
+STATE_REASON=""
 
 api_ready=0
 attempt=0
@@ -226,6 +298,7 @@ while true; do
 		fi
 		CORE_PID="$current_core_pid"
 		ACTIVE_FAILURES=0
+		FIRST_FAILURE_AT=0
 		RECOVERY_COUNT=0
 		write_state "xray-recovered"
 		log_event "state=$STATE node=$CURRENT_ID reason=xray-recovered"
@@ -244,19 +317,35 @@ while true; do
 			BACKOFF_INDEX=0
 			continue
 		fi
+		if wan_available; then
+			if [ "$STATE_REASON" != "probe-endpoint-failed" ]; then
+				write_state "probe-endpoint-failed"
+				log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed"
+			fi
+		else
+			if [ "$STATE_REASON" != "wan-down" ]; then
+				write_state "wan-down"
+				log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+			fi
+		fi
 		delay="$(backoff_seconds "$BACKOFF_INDEX")"
 		[ "$BACKOFF_INDEX" -lt 4 ] && BACKOFF_INDEX=$((BACKOFF_INDEX + 1))
 		sleep "$delay"
 		continue
 	fi
 
-	if probe_tag "$CURRENT_TAG"; then
+	if probe_tag "$CURRENT_ID" "$CURRENT_TAG"; then
 		ACTIVE_FAILURES=0
+		FIRST_FAILURE_AT=0
+		if [ "$STATE_REASON" = "wan-down" ]; then
+			write_state "wan-recovered"
+			log_event "state=$STATE node=$CURRENT_ID reason=wan-recovered"
+		fi
 		if [ "$STATE" = "backup" ] && [ "$RESTORE_PRIMARY" != "0" ]; then
 			now="$(date +%s)"
 			if [ $((now - SWITCHED_AT)) -ge "$MINIMUM_DWELL" ] && [ $((now - LAST_RECOVERY_CHECK)) -ge "$RECOVERY_INTERVAL" ]; then
 				LAST_RECOVERY_CHECK="$now"
-				if probe_tag "$PRIMARY_TAG"; then
+				if probe_tag "$PRIMARY_ID" "$PRIMARY_TAG"; then
 					RECOVERY_COUNT=$((RECOVERY_COUNT + 1))
 					if [ "$RECOVERY_COUNT" -ge "$RECOVERY_SUCCESSES" ]; then
 						set_main "$PRIMARY_ID" "$PRIMARY_TAG" "primary" "primary-stable"
@@ -270,9 +359,22 @@ while true; do
 		continue
 	fi
 
+	now="$(date +%s)"
+	if [ "$ACTIVE_FAILURES" -eq 0 ]; then
+		FIRST_FAILURE_AT="$now"
+	fi
 	ACTIVE_FAILURES=$((ACTIVE_FAILURES + 1))
 	if [ "$ACTIVE_FAILURES" -lt "$FAILURE_THRESHOLD" ]; then
-		sleep 2
+		delay=2
+		elapsed=$((now - FIRST_FAILURE_AT))
+		remaining=$((MINIMUM_FAILURE_DURATION - elapsed))
+		[ "$remaining" -gt "$delay" ] && delay="$remaining"
+		sleep "$delay"
+		continue
+	fi
+	elapsed=$((now - FIRST_FAILURE_AT))
+	if [ "$elapsed" -lt "$MINIMUM_FAILURE_DURATION" ]; then
+		sleep "$((MINIMUM_FAILURE_DURATION - elapsed))"
 		continue
 	fi
 
@@ -281,17 +383,26 @@ while true; do
 		node_id=${candidate%%|*}
 		node_tag=${candidate#*|}
 		if [ "$node_id" = "$PRIMARY_ID" ]; then
-			set_main "$node_id" "$node_tag" "primary" "active-node-failed"
+			set_main "$node_id" "$node_tag" "primary" "node-failed"
 		else
-			set_main "$node_id" "$node_tag" "backup" "active-node-failed"
+			set_main "$node_id" "$node_tag" "backup" "node-failed"
 		fi
 		continue
 	fi
 
+	if ! wan_available; then
+		if [ "$STATE_REASON" != "wan-down" ]; then
+			write_state "wan-down"
+			log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+		fi
+		sleep "$CHECK_INTERVAL"
+		continue
+	fi
+
 	if [ "$DIRECT_FALLBACK" = "1" ]; then
-		set_main "direct" "direct" "direct-fallback" "all-nodes-failed"
+		set_main "direct" "direct" "direct-fallback" "probe-endpoint-failed"
 	else
-		set_main "blackhole" "blackhole" "all-down" "all-nodes-failed"
+		set_main "blackhole" "blackhole" "all-down" "probe-endpoint-failed"
 	fi
 	BACKOFF_INDEX=0
 done

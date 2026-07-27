@@ -1280,6 +1280,7 @@ function gen_config(var)
 			check_interval = tonumber(_node.failover_check_interval) or 20,
 			connect_timeout = tonumber(_node.failover_connect_timeout) or 3,
 			failure_threshold = tonumber(_node.failover_failure_threshold) or 2,
+			minimum_failure_duration = tonumber(_node.failover_minimum_failure_duration) or 10,
 			recovery_interval = tonumber(_node.failover_recovery_interval) or 300,
 			recovery_successes = tonumber(_node.failover_recovery_successes) or 2,
 			minimum_dwell = tonumber(_node.failover_minimum_dwell) or 600,

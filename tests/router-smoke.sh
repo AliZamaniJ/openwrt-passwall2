@@ -25,8 +25,11 @@ ash -n "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failov
 grep -q 'max-tcp-connections=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/helper_dnsmasq.lua"
 grep -q 'max-tcp-connections=${tcp_max_connections:-20}' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'protocol == "_failover"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
+grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
+grep -q 'reason=probe-endpoint-failed.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_backup_node' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
+grep -q 'status.reason or translate("Unknown")' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'candidate.type == "Xray" and self_contained' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'backup_limit = 9' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 [ "$(grep -c 'start_priority_failover' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh")" -eq 3 ]
@@ -194,7 +197,8 @@ cat > "$RUNTIME_CONFIG" <<EOF
   "restore_primary": false,
   "check_interval": 10,
   "connect_timeout": 1,
-  "failure_threshold": 1,
+  "failure_threshold": 2,
+  "minimum_failure_duration": 2,
   "recovery_interval": 60,
   "recovery_successes": 2,
   "minimum_dwell": 60,
@@ -210,6 +214,7 @@ fi
 "$XRAY_BIN" run -c "$XRAY_CONFIG" >"$WORK_DIR/xray.log" 2>&1 &
 XRAY_PID=$!
 
+FAILURE_TEST_STARTED=$(date +%s)
 "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh" "$RUNTIME_CONFIG" >"$WORK_DIR/supervisor.log" 2>&1 &
 SUPERVISOR_PID=$!
 
@@ -224,12 +229,15 @@ done
 
 [ "${state:-}" = "backup" ]
 [ "${current:-}" = "working" ]
+reason=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.reason')
+switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
+[ "$reason" = "node-failed" ]
+[ $((switched_at - FAILURE_TEST_STARTED)) -ge 2 ]
 code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 3 --max-time 6 \
 	--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
 	"http://127.0.0.1:$HTTP_PORT/cgi-bin/health")
 [ "$code" = "200" ]
 
-switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
 kill "$XRAY_PID"
 wait "$XRAY_PID" 2>/dev/null || true
 XRAY_PID=""

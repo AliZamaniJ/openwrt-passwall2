@@ -51,12 +51,15 @@ The default timings are:
 | Active check interval | 20 seconds |
 | Connect timeout | 3 seconds |
 | Failed health cycles | 2 |
+| Minimum failure duration | 10 seconds |
 | Primary recovery interval | 5 minutes |
 | Primary recovery successes | 2 |
 | Minimum backup dwell | 10 minutes |
 | All-down retry backoff | 15, 30, 60, 120, 300 seconds |
 
-The primary probe is `https://www.gstatic.com/generate_204`. If it fails, `https://cp.cloudflare.com/generate_204` confirms the failure. Custom URLs are also supported; any final HTTP 2xx response is healthy. A node is unhealthy only when both endpoints fail.
+The primary probe is `https://www.gstatic.com/generate_204`. If it fails, `https://cp.cloudflare.com/generate_204` confirms the failure. Custom URLs are also supported; any final HTTP 2xx response is healthy. A node is unhealthy only when both endpoints fail. By default, the second failed health cycle cannot complete the failure decision until at least ten seconds after the first failed cycle, which filters short correlated network stalls without requiring a third cycle.
+
+Every failed endpoint probe records the node ID, URL, curl exit status, HTTP status, connect time, TLS handshake time, and total time in syslog with the `probe-endpoint-failed` reason. A confirmed active-node failure is recorded as `node-failed` when another candidate answers the same probes. If no candidate answers, the supervisor checks the default route, link carrier, and gateway: a failed WAN check is recorded as `wan-down`, while an available WAN with no successful candidate is recorded as `probe-endpoint-failed` and follows the configured all-down fallback policy.
 
 While a node is healthy, no other candidate is probed. After the active node reaches the failure threshold, backups are tested serially in their configured order and the first healthy candidate wins. While a backup is active, only that backup receives normal health checks. The primary receives a recovery probe every five minutes and is restored only after the recovery threshold and minimum dwell time are both satisfied.
 
