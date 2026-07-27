@@ -144,7 +144,7 @@ RUNTIME_CONFIG="$WORK_DIR/smoke.json"
 mkdir -p "$WORK_DIR/www/cgi-bin"
 cat > "$WORK_DIR/www/cgi-bin/health" <<'EOF'
 #!/bin/sh
-printf 'Status: 204 No Content\r\nContent-Length: 0\r\n\r\n'
+printf 'Status: 200 OK\r\nContent-Length: 0\r\n\r\n'
 EOF
 chmod 755 "$WORK_DIR" "$WORK_DIR/www" "$WORK_DIR/www/cgi-bin" "$WORK_DIR/www/cgi-bin/health"
 /usr/sbin/uhttpd -f -p "127.0.0.1:$HTTP_PORT" -h "$WORK_DIR/www" -x /cgi-bin >"$WORK_DIR/uhttpd.log" 2>&1 &
@@ -226,7 +226,7 @@ done
 code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 3 --max-time 6 \
 	--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
 	"http://127.0.0.1:$HTTP_PORT/cgi-bin/health")
-[ "$code" = "204" ]
+[ "$code" = "200" ]
 
 switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
 kill "$XRAY_PID"
@@ -242,13 +242,13 @@ while [ "$attempt" -lt 20 ]; do
 	code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 1 --max-time 2 \
 		--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
 		"http://127.0.0.1:$HTTP_PORT/cgi-bin/health" 2>/dev/null || true)
-	[ "$reason" = "xray-recovered" ] && [ "$code" = "204" ] && break
+	[ "$reason" = "xray-recovered" ] && [ "$code" = "200" ] && break
 	attempt=$((attempt + 1))
 	sleep 1
 done
 
 [ "$reason" = "xray-recovered" ]
-[ "$code" = "204" ]
+[ "$code" = "200" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.state')" = "backup" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.current_id')" = "working" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')" = "$switched_at" ]

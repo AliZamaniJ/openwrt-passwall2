@@ -56,7 +56,7 @@ The default timings are:
 | Minimum backup dwell | 10 minutes |
 | All-down retry backoff | 15, 30, 60, 120, 300 seconds |
 
-The primary probe is `https://www.gstatic.com/generate_204`. If it fails, `https://cp.cloudflare.com/generate_204` confirms the failure. A node is unhealthy only when both endpoints fail.
+The primary probe is `https://www.gstatic.com/generate_204`. If it fails, `https://cp.cloudflare.com/generate_204` confirms the failure. Custom URLs are also supported; any final HTTP 2xx response is healthy. A node is unhealthy only when both endpoints fail.
 
 While a node is healthy, no other candidate is probed. After the active node reaches the failure threshold, backups are tested serially in their configured order and the first healthy candidate wins. While a backup is active, only that backup receives normal health checks. The primary receives a recovery probe every five minutes and is restored only after the recovery threshold and minimum dwell time are both satisfied.
 

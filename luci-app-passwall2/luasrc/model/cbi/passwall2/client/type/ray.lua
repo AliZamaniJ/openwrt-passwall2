@@ -383,8 +383,8 @@ if load_failover_options then -- [[ Priority failover Start ]]
 	advanced_value("failover_recovery_interval", translate("Primary recovery interval"), "300", "min(60)", translate("Units: seconds"))
 	advanced_value("failover_recovery_successes", translate("Recovery success threshold"), "2", "range(1,5)")
 	advanced_value("failover_minimum_dwell", translate("Minimum backup dwell time"), "600", "min(0)", translate("Units: seconds"))
-	advanced_value("failover_primary_url", translate("Primary probe URL"), "https://www.gstatic.com/generate_204", "string")
-	advanced_value("failover_secondary_url", translate("Secondary probe URL"), "https://cp.cloudflare.com/generate_204", "string")
+	advanced_value("failover_primary_url", translate("Primary probe URL"), "https://www.gstatic.com/generate_204", "string", translate("Any final HTTP 2xx response is treated as healthy."))
+	advanced_value("failover_secondary_url", translate("Secondary probe URL"), "https://cp.cloudflare.com/generate_204", "string", translate("Any final HTTP 2xx response is treated as healthy."))
 end -- [[ Priority failover End ]]
 
 if load_iface_options then -- [[ Custom Interface Start ]]

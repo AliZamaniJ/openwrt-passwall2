@@ -90,7 +90,10 @@ probe_url() {
 		--max-time "$((CONNECT_TIMEOUT + 3))" \
 		--proxy "socks5h://127.0.0.1:${PROBE_PORT}" \
 		-w '%{http_code}' "$url" 2>/dev/null)"
-	[ "$code" = "204" ]
+	case "$code" in
+		2??) return 0 ;;
+		*) return 1 ;;
+	esac
 }
 
 probe_tag() {
