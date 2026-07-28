@@ -100,9 +100,10 @@ get_core_pid() {
 write_state() {
 	local reason="$1"
 	STATE_REASON="$reason"
-	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s,"switched_monotonic":%s,"failure_count":%s,"first_failure_at":%s}\n' \
+	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s,"switched_monotonic":%s,"failure_count":%s,"first_failure_at":%s,"last_failed_id":"%s","last_failure_count":%s,"last_failure_started_at":%s}\n' \
 		"$FAILOVER_ID" "$STATE" "$CURRENT_ID" "$CURRENT_TAG" "$reason" "$SWITCHED_AT" \
-		"${SWITCHED_MONOTONIC:-0}" "${ACTIVE_FAILURES:-0}" "${FIRST_FAILURE_AT:-0}" > "$STATE_FILE"
+		"${SWITCHED_MONOTONIC:-0}" "${ACTIVE_FAILURES:-0}" "${FIRST_FAILURE_AT:-0}" \
+		"${LAST_FAILED_ID:-}" "${LAST_FAILURE_COUNT:-0}" "${LAST_FAILURE_STARTED_AT:-0}" > "$STATE_FILE"
 }
 
 set_main() {
@@ -116,6 +117,11 @@ set_main() {
 	local switched_monotonic
 	switched_monotonic="$(monotonic_seconds)" || return 1
 	override_balancer "$MAIN_BALANCER" "$node_tag" || return 1
+	if [ "$previous_failures" -gt 0 ]; then
+		LAST_FAILED_ID="$previous_id"
+		LAST_FAILURE_COUNT="$previous_failures"
+		LAST_FAILURE_STARTED_AT="$failure_started"
+	fi
 	CURRENT_ID="$node_id"
 	CURRENT_TAG="$node_tag"
 	STATE="$state"
@@ -325,15 +331,26 @@ backoff_seconds() {
 
 restore_previous_state() {
 	[ -s "$STATE_FILE" ] || return 1
-	local saved_id saved_tag saved_state saved_switched saved_switched_monotonic now_monotonic candidate
+	local saved_id saved_tag saved_state saved_switched saved_switched_monotonic
+	local saved_last_failed_id saved_last_failure_count saved_last_failure_started_at
+	local now_monotonic candidate
 	saved_id="$(jsonfilter -i "$STATE_FILE" -e '@.current_id' 2>/dev/null)"
 	saved_tag="$(jsonfilter -i "$STATE_FILE" -e '@.current_tag' 2>/dev/null)"
 	saved_state="$(jsonfilter -i "$STATE_FILE" -e '@.state' 2>/dev/null)"
 	saved_switched="$(jsonfilter -i "$STATE_FILE" -e '@.switched_at' 2>/dev/null)"
 	saved_switched_monotonic="$(jsonfilter -i "$STATE_FILE" -e '@.switched_monotonic' 2>/dev/null)"
+	saved_last_failed_id="$(jsonfilter -i "$STATE_FILE" -e '@.last_failed_id' 2>/dev/null || true)"
+	saved_last_failure_count="$(jsonfilter -i "$STATE_FILE" -e '@.last_failure_count' 2>/dev/null || true)"
+	saved_last_failure_started_at="$(jsonfilter -i "$STATE_FILE" -e '@.last_failure_started_at' 2>/dev/null || true)"
 	now_monotonic="$(monotonic_seconds)" || return 1
 	case "$saved_switched_monotonic" in
 		''|*[!0-9]*) saved_switched_monotonic="$now_monotonic" ;;
+	esac
+	case "$saved_last_failure_count" in
+		''|*[!0-9]*) saved_last_failure_count=0 ;;
+	esac
+	case "$saved_last_failure_started_at" in
+		''|*[!0-9]*) saved_last_failure_started_at=0 ;;
 	esac
 	[ "$saved_switched_monotonic" -le "$now_monotonic" ] || saved_switched_monotonic="$now_monotonic"
 	case "$saved_id" in
@@ -350,6 +367,9 @@ restore_previous_state() {
 	STATE=${saved_state:-backup}
 	SWITCHED_AT=${saved_switched:-$(date +%s)}
 	SWITCHED_MONOTONIC="$saved_switched_monotonic"
+	LAST_FAILED_ID="$saved_last_failed_id"
+	LAST_FAILURE_COUNT="$saved_last_failure_count"
+	LAST_FAILURE_STARTED_AT="$saved_last_failure_started_at"
 	return 0
 }
 
@@ -364,6 +384,9 @@ SWITCHED_MONOTONIC="$(monotonic_seconds)" || exit 1
 ACTIVE_FAILURES=0
 FIRST_FAILURE_AT=0
 FIRST_FAILURE_MONOTONIC=0
+LAST_FAILED_ID=""
+LAST_FAILURE_COUNT=0
+LAST_FAILURE_STARTED_AT=0
 RECOVERY_COUNT=0
 LAST_RECOVERY_CHECK_MONOTONIC=0
 BACKOFF_INDEX=0

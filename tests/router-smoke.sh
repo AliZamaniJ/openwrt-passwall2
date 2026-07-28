@@ -29,6 +29,8 @@ grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/l
 grep -q 'failover_failure_threshold".*"range(2,5)"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'reason=probe-endpoint-failed.*url=\$sanitized_url.*curl_exit=.*http_code=.*time_connect=.*time_appconnect=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'time_tls=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+grep -q '"last_failed_id":"%s","last_failure_count":%s,"last_failure_started_at":%s' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+grep -q "'@.last_failure_count'" "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q 'FIRST_FAILURE_MONOTONIC' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q 'SWITCHED_MONOTONIC' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'now - FIRST_FAILURE_AT' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
@@ -51,7 +53,7 @@ grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/
 grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
 
 FAILOVER_SCRIPT="$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
-FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^sanitize_probe_url()/,/^}/p; /^monotonic_seconds()/,/^}/p; /^elapsed_seconds()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_candidate_available()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
+FAILOVER_HELPERS="$(sed -n '/^write_state()/,/^}/p; /^set_main()/,/^}/p; /^normalize_failure_threshold()/,/^}/p; /^sanitize_probe_url()/,/^}/p; /^monotonic_seconds()/,/^}/p; /^elapsed_seconds()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_candidate_available()/,/^}/p; /^wan_available()/,/^}/p; /^restore_previous_state()/,/^}/p' "$FAILOVER_SCRIPT")"
 eval "$FAILOVER_HELPERS"
 [ "$(normalize_failure_threshold 1)" = "2" ]
 [ "$(normalize_failure_threshold 2)" = "2" ]
@@ -127,6 +129,59 @@ if wan_available; then false; fi
 WAN_TEST_SCENARIO=all_down
 if wan_available; then false; fi
 [ "$WAN_DETAIL" = "carrier-down" ]
+
+(
+	STATE_FILE="$(mktemp /tmp/passwall2-failover-state.XXXXXX)"
+	trap 'rm -f "$STATE_FILE"' EXIT
+	FAILOVER_ID="state-test"
+	MAIN_BALANCER="state-main"
+	CURRENT_ID="broken"
+	CURRENT_TAG="blackhole"
+	STATE="primary"
+	SWITCHED_AT=100
+	SWITCHED_MONOTONIC=100
+	ACTIVE_FAILURES=2
+	FIRST_FAILURE_AT=101
+	FIRST_FAILURE_MONOTONIC=100
+	LAST_FAILED_ID=""
+	LAST_FAILURE_COUNT=0
+	LAST_FAILURE_STARTED_AT=0
+	RECOVERY_COUNT=0
+	override_balancer() { return 0; }
+	log_event() { :; }
+	monotonic_seconds() { echo 500; }
+	set_main "working" "direct" "backup" "node-failed"
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.current_id')" = "working" ]
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.failure_count')" = "0" ]
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.first_failure_at')" = "0" ]
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.last_failed_id')" = "broken" ]
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.last_failure_count')" = "2" ]
+	[ "$(jsonfilter -i "$STATE_FILE" -e '@.last_failure_started_at')" = "101" ]
+	CURRENT_ID="reset"
+	CURRENT_TAG="reset"
+	STATE="primary"
+	LAST_FAILED_ID=""
+	LAST_FAILURE_COUNT=0
+	LAST_FAILURE_STARTED_AT=0
+	DIRECT_FALLBACK=0
+	candidate_tag() {
+		[ "$1" = "working" ] || return 1
+		echo "direct"
+	}
+	restore_previous_state
+	[ "$CURRENT_ID" = "working" ]
+	[ "$LAST_FAILED_ID" = "broken" ]
+	[ "$LAST_FAILURE_COUNT" = "2" ]
+	[ "$LAST_FAILURE_STARTED_AT" = "101" ]
+	printf '%s\n' '{"current_id":"working","current_tag":"direct","state":"backup","switched_at":200,"switched_monotonic":200}' > "$STATE_FILE"
+	LAST_FAILED_ID="stale"
+	LAST_FAILURE_COUNT=9
+	LAST_FAILURE_STARTED_AT=99
+	restore_previous_state
+	[ -z "$LAST_FAILED_ID" ]
+	[ "$LAST_FAILURE_COUNT" = "0" ]
+	[ "$LAST_FAILURE_STARTED_AT" = "0" ]
+)
 
 TCP_LIMIT=$(lua "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/helper_dnsmasq.lua" get_tcp_connection_limit)
 case "$TCP_LIMIT" in
@@ -317,7 +372,19 @@ done
 reason=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.reason')
 switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
 switched_monotonic=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_monotonic')
+failure_count=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.failure_count')
+first_failure_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.first_failure_at')
+last_failed_id=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failed_id')
+last_failure_count=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failure_count')
+last_failure_started_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failure_started_at')
 [ "$reason" = "node-failed" ]
+[ "$failure_count" = "0" ]
+[ "$first_failure_at" = "0" ]
+[ "$last_failed_id" = "broken" ]
+[ "$last_failure_count" = "2" ]
+case "$last_failure_started_at" in
+	''|0|*[!0-9]*) false ;;
+esac
 case "$switched_at" in
 	''|*[!0-9]*) false ;;
 esac
@@ -354,6 +421,9 @@ done
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.current_id')" = "working" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')" = "$switched_at" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_monotonic')" = "$switched_monotonic" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failed_id')" = "$last_failed_id" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failure_count')" = "$last_failure_count" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.last_failure_started_at')" = "$last_failure_started_at" ]
 kill -0 "$SUPERVISOR_PID"
 
 echo "priority failover smoke test passed"
