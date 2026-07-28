@@ -27,7 +27,6 @@ grep -q 'max-tcp-connections=${tcp_max_connections:-20}' "$SOURCE_ROOT/luci-app-
 grep -q 'protocol == "_failover"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'reason=probe-endpoint-failed.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
-awk '/WAN_DETAIL="gateway-ping-unanswered"/ { getline; safe = ($0 ~ /return 0/) } END { exit !safe }' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'WAN_DETAIL="gateway-unreachable"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_backup_node' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
@@ -44,6 +43,59 @@ grep -q 'ready_timeout=30' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passw
 grep -q 'stop_socks_runtime "$flag"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/socks_auto_switch.sh"
 grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
+
+FAILOVER_SCRIPT="$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+WAN_HELPERS="$(sed -n '/^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
+eval "$WAN_HELPERS"
+ping() {
+	case "$1:$2:$3" in
+		-4:-I:wan4|-6:-I:wan6) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+gateway_ping 4 wan4 192.0.2.1
+gateway_ping 6 wan6 fe80::1
+ip() {
+	case "${WAN_TEST_SCENARIO}:$1" in
+		ipv4:-4) echo 'default via 192.0.2.1 dev wan4' ;;
+		ipv6:-6) echo 'default via fe80::1 dev wan6 metric 1024' ;;
+		multi:-4) printf '%s\n' 'default via 192.0.2.1 dev wan4down metric 10' 'default via 192.0.2.2 dev wan4backup metric 20' ;;
+		dual:-4) echo 'default via 192.0.2.1 dev wan4down' ;;
+		dual:-6) echo 'default via fe80::1 dev wan6 metric 1024' ;;
+		no_device:-4) echo 'default via 192.0.2.1' ;;
+		all_down:-4) echo 'default via 192.0.2.1 dev wan4down' ;;
+		all_down:-6) echo 'default via fe80::1 dev wan6down metric 1024' ;;
+	esac
+}
+route_carrier_down() {
+	case "$1" in
+		wan4down|wan6down) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+gateway_ping() { return 1; }
+
+WAN_TEST_SCENARIO=ipv4
+wan_available
+[ "$WAN_FAMILY" = "4" ] && [ "$WAN_DEVICE" = "wan4" ] && [ "$WAN_DETAIL" = "gateway-ping-unanswered" ]
+WAN_TEST_SCENARIO=ipv6
+wan_available
+[ "$WAN_FAMILY" = "6" ] && [ "$WAN_DEVICE" = "wan6" ] && [ "$WAN_DETAIL" = "gateway-ping-unanswered" ]
+WAN_TEST_SCENARIO=multi
+wan_available
+[ "$WAN_FAMILY" = "4" ] && [ "$WAN_DEVICE" = "wan4backup" ]
+WAN_TEST_SCENARIO=dual
+wan_available
+[ "$WAN_FAMILY" = "6" ] && [ "$WAN_DEVICE" = "wan6" ]
+WAN_TEST_SCENARIO=none
+if wan_available; then false; fi
+[ "$WAN_DETAIL" = "no-default-route" ]
+WAN_TEST_SCENARIO=no_device
+if wan_available; then false; fi
+[ "$WAN_DETAIL" = "no-default-device" ]
+WAN_TEST_SCENARIO=all_down
+if wan_available; then false; fi
+[ "$WAN_DETAIL" = "carrier-down" ]
 
 TCP_LIMIT=$(lua "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/helper_dnsmasq.lua" get_tcp_connection_limit)
 case "$TCP_LIMIT" in

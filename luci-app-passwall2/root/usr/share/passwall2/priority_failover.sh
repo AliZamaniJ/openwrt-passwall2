@@ -127,50 +127,84 @@ probe_tag() {
 	probe_url "$node_id" "$SECONDARY_URL"
 }
 
+route_carrier_down() {
+	local device="$1"
+	local carrier
+	[ -r "/sys/class/net/${device}/carrier" ] || return 1
+	carrier="$(cat "/sys/class/net/${device}/carrier" 2>/dev/null)"
+	[ "$carrier" = "0" ]
+}
+
+gateway_ping() {
+	local family="$1"
+	local device="$2"
+	local gateway="$3"
+	if [ "$family" = "6" ]; then
+		ping -6 -I "$device" -c 1 -W 1 "$gateway" >/dev/null 2>&1
+	else
+		ping -4 -I "$device" -c 1 -W 1 "$gateway" >/dev/null 2>&1
+	fi
+}
+
 wan_available() {
-	local route device gateway carrier
+	local routes entry family route device gateway
+	local route_count=0
+	local device_count=0
 	WAN_DEVICE=""
 	WAN_GATEWAY=""
+	WAN_FAMILY=""
 	WAN_DETAIL=""
-	route="$(ip -4 route show default 2>/dev/null | sed -n '1p')"
-	if [ -z "$route" ]; then
-		WAN_DETAIL="no-default-route"
-		return 1
-	fi
+	routes="$({
+		ip -4 route show default 2>/dev/null | sed 's/^/4|/'
+		ip -6 route show default 2>/dev/null | sed 's/^/6|/'
+	})"
 
-	set -- $route
-	while [ "$#" -gt 0 ]; do
-		case "$1" in
-			dev)
-				shift
-				device="$1"
-				;;
-			via)
-				shift
-				gateway="$1"
-				;;
-		esac
-		shift
-	done
-	WAN_DEVICE="$device"
-	WAN_GATEWAY="$gateway"
-	if [ -z "$device" ]; then
-		WAN_DETAIL="no-default-device"
-		return 1
-	fi
-	if [ -r "/sys/class/net/${device}/carrier" ]; then
-		carrier="$(cat "/sys/class/net/${device}/carrier" 2>/dev/null)"
-		if [ "$carrier" != "1" ]; then
-			WAN_DETAIL="carrier-down"
-			return 1
+	while IFS= read -r entry; do
+		[ -n "$entry" ] || continue
+		family=${entry%%|*}
+		route=${entry#*|}
+		route_count=$((route_count + 1))
+		device=""
+		gateway=""
+		set -- $route
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				dev)
+					shift
+					device="$1"
+					;;
+				via)
+					shift
+					gateway="$1"
+					;;
+			esac
+			shift
+		done
+		WAN_FAMILY="$family"
+		WAN_DEVICE="$device"
+		WAN_GATEWAY="$gateway"
+		[ -n "$device" ] || continue
+		device_count=$((device_count + 1))
+		route_carrier_down "$device" && continue
+
+		if [ -n "$gateway" ] && ! gateway_ping "$family" "$device" "$gateway"; then
+			WAN_DETAIL="gateway-ping-unanswered"
+		else
+			WAN_DETAIL="available"
 		fi
-	fi
-	if [ -n "$gateway" ] && ! ping -c 1 -W 1 "$gateway" >/dev/null 2>&1; then
-		WAN_DETAIL="gateway-ping-unanswered"
 		return 0
+	done <<-EOF
+	$routes
+	EOF
+
+	if [ "$route_count" -eq 0 ]; then
+		WAN_DETAIL="no-default-route"
+	elif [ "$device_count" -eq 0 ]; then
+		WAN_DETAIL="no-default-device"
+	else
+		WAN_DETAIL="carrier-down"
 	fi
-	WAN_DETAIL="available"
-	return 0
+	return 1
 }
 
 candidate_tag() {
@@ -320,12 +354,12 @@ while true; do
 		if wan_available; then
 			if [ "$STATE_REASON" != "probe-endpoint-failed" ]; then
 				write_state "probe-endpoint-failed"
-				log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+				log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL family=${WAN_FAMILY:-unknown} device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 			fi
 		else
 			if [ "$STATE_REASON" != "wan-down" ]; then
 				write_state "wan-down"
-				log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+				log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL family=${WAN_FAMILY:-unknown} device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 			fi
 		fi
 		delay="$(backoff_seconds "$BACKOFF_INDEX")"
@@ -393,12 +427,12 @@ while true; do
 	if ! wan_available; then
 		if [ "$STATE_REASON" != "wan-down" ]; then
 			write_state "wan-down"
-			log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+			log_event "state=$STATE node=$CURRENT_ID reason=wan-down detail=$WAN_DETAIL family=${WAN_FAMILY:-unknown} device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 		fi
 		sleep "$CHECK_INTERVAL"
 		continue
 	fi
-	log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
+	log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL family=${WAN_FAMILY:-unknown} device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 
 	if [ "$DIRECT_FALLBACK" = "1" ]; then
 		set_main "direct" "direct" "direct-fallback" "probe-endpoint-failed"
