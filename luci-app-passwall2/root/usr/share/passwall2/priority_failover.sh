@@ -19,6 +19,16 @@ normalize_failure_threshold() {
 	esac
 }
 
+sanitize_probe_url() {
+	printf '%s' "$1" |
+		tr '\r\n\t' '___' |
+		sed -e 's/[?#].*$//' \
+			-e 's#^\([[:alpha:]][[:alnum:]+.-]*://\)[^/@]*@#\1#' \
+			-e 's#^//[^/@]*@#//#' \
+			-e 's#^[^/@]*@##' \
+			-e 's/[[:space:]]/_/g'
+}
+
 load_config() {
 	json_cleanup
 	json_load "$(cat "$CONFIG_FILE")" || return 1
@@ -100,7 +110,7 @@ set_main() {
 probe_url() {
 	local node_id="$1"
 	local url="$2"
-	local result curl_exit code remainder time_connect time_appconnect time_tls time_total
+	local result curl_exit code remainder time_connect time_appconnect time_tls time_total sanitized_url
 	result="$(/usr/bin/curl -o /dev/null -sS -L \
 		--connect-timeout "$CONNECT_TIMEOUT" \
 		--max-time "$((CONNECT_TIMEOUT + 3))" \
@@ -117,7 +127,8 @@ probe_url() {
 		2??) return 0 ;;
 		*)
 			time_tls="$(awk -v appconnect="${time_appconnect:-0}" -v connect="${time_connect:-0}" 'BEGIN { duration = appconnect - connect; if (duration < 0) duration = 0; printf "%.6f", duration }')"
-			log_event "reason=probe-endpoint-failed node=$node_id url=$url curl_exit=$curl_exit http_code=${code:-000} time_connect=${time_connect:-0} time_tls=${time_tls:-0} time_total=${time_total:-0}"
+			sanitized_url="$(sanitize_probe_url "$url")"
+			log_event "reason=probe-endpoint-failed node=$node_id url=$sanitized_url curl_exit=$curl_exit http_code=${code:-000} time_connect=${time_connect:-0} time_tls=${time_tls:-0} time_total=${time_total:-0}"
 			return 1
 			;;
 	esac
@@ -153,8 +164,24 @@ gateway_ping() {
 	fi
 }
 
+wan_candidate_available() {
+	local family="$1"
+	local device="$2"
+	local gateway="$3"
+	WAN_FAMILY="$family"
+	WAN_DEVICE="$device"
+	WAN_GATEWAY="$gateway"
+	route_carrier_down "$device" && return 1
+	if [ -n "$gateway" ] && ! gateway_ping "$family" "$device" "$gateway"; then
+		WAN_DETAIL="gateway-ping-unanswered"
+	else
+		WAN_DETAIL="available"
+	fi
+	return 0
+}
+
 wan_available() {
-	local routes entry family route device gateway
+	local routes entry family route device gateway token route_has_nexthop
 	local route_count=0
 	local device_count=0
 	WAN_DEVICE=""
@@ -173,33 +200,43 @@ wan_available() {
 		route_count=$((route_count + 1))
 		device=""
 		gateway=""
+		route_has_nexthop=0
 		set -- $route
 		while [ "$#" -gt 0 ]; do
-			case "$1" in
+			token="$1"
+			shift
+			case "$token" in
+				nexthop)
+					if [ "$route_has_nexthop" -eq 1 ] && [ -n "$device" ]; then
+						device_count=$((device_count + 1))
+						wan_candidate_available "$family" "$device" "$gateway" && return 0
+					fi
+					route_has_nexthop=1
+					device=""
+					gateway=""
+					;;
 				dev)
-					shift
+					[ "$#" -gt 0 ] || break
 					device="$1"
+					shift
 					;;
 				via)
-					shift
+					[ "$#" -gt 0 ] || break
 					gateway="$1"
+					shift
+					case "$gateway" in
+						inet|inet6)
+							[ "$#" -gt 0 ] || { gateway=""; break; }
+							gateway="$1"
+							shift
+							;;
+					esac
 					;;
 			esac
-			shift
 		done
-		WAN_FAMILY="$family"
-		WAN_DEVICE="$device"
-		WAN_GATEWAY="$gateway"
 		[ -n "$device" ] || continue
 		device_count=$((device_count + 1))
-		route_carrier_down "$device" && continue
-
-		if [ -n "$gateway" ] && ! gateway_ping "$family" "$device" "$gateway"; then
-			WAN_DETAIL="gateway-ping-unanswered"
-		else
-			WAN_DETAIL="available"
-		fi
-		return 0
+		wan_candidate_available "$family" "$device" "$gateway" && return 0
 	done <<-EOF
 	$routes
 	EOF

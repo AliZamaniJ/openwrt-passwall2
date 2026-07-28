@@ -27,7 +27,7 @@ grep -q 'max-tcp-connections=${tcp_max_connections:-20}' "$SOURCE_ROOT/luci-app-
 grep -q 'protocol == "_failover"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_failure_threshold".*"range(2,5)"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
-grep -q 'reason=probe-endpoint-failed.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+grep -q 'reason=probe-endpoint-failed.*url=$sanitized_url.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'WAN_DETAIL="gateway-unreachable"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_backup_node' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
@@ -46,13 +46,19 @@ grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/
 grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
 
 FAILOVER_SCRIPT="$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
-FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
+FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^sanitize_probe_url()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_candidate_available()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
 eval "$FAILOVER_HELPERS"
 [ "$(normalize_failure_threshold 1)" = "2" ]
 [ "$(normalize_failure_threshold 2)" = "2" ]
 [ "$(normalize_failure_threshold 5)" = "5" ]
 [ "$(normalize_failure_threshold 6)" = "2" ]
 [ "$(normalize_failure_threshold invalid)" = "2" ]
+[ "$(sanitize_probe_url 'https://user:password@example.com:8443/health?token=secret#fragment')" = "https://example.com:8443/health" ]
+[ "$(sanitize_probe_url '//user:password@example.com/health?token=secret')" = "//example.com/health" ]
+[ "$(sanitize_probe_url 'https://example.com/health?token=secret')" = "https://example.com/health" ]
+[ "$(sanitize_probe_url 'https://example.com/health#fragment')" = "https://example.com/health" ]
+[ "$(sanitize_probe_url 'https://example.com/health')" = "https://example.com/health" ]
+[ "$(sanitize_probe_url "$(printf 'https://example.com/health\nforged')")" = "https://example.com/health_forged" ]
 ping() {
 	case "$1:$2:$3" in
 		-4:-I:wan4|-6:-I:wan6) return 0 ;;
@@ -66,6 +72,8 @@ ip() {
 		ipv4:-4) echo 'default via 192.0.2.1 dev wan4' ;;
 		ipv6:-6) echo 'default via fe80::1 dev wan6 metric 1024' ;;
 		multi:-4) printf '%s\n' 'default via 192.0.2.1 dev wan4down metric 10' 'default via 192.0.2.2 dev wan4backup metric 20' ;;
+		ecmp_first:-4) echo 'default proto static metric 10 nexthop via 192.0.2.1 dev wan4backup weight 1 nexthop via 192.0.2.2 dev wan4down weight 1' ;;
+		ecmp_later:-4) echo 'default proto static metric 10 nexthop via 192.0.2.1 dev wan4down weight 1 nexthop via 192.0.2.2 dev wan4backup weight 1' ;;
 		dual:-4) echo 'default via 192.0.2.1 dev wan4down' ;;
 		dual:-6) echo 'default via fe80::1 dev wan6 metric 1024' ;;
 		no_device:-4) echo 'default via 192.0.2.1' ;;
@@ -90,6 +98,12 @@ wan_available
 WAN_TEST_SCENARIO=multi
 wan_available
 [ "$WAN_FAMILY" = "4" ] && [ "$WAN_DEVICE" = "wan4backup" ]
+WAN_TEST_SCENARIO=ecmp_first
+wan_available
+[ "$WAN_FAMILY" = "4" ] && [ "$WAN_DEVICE" = "wan4backup" ] && [ "$WAN_GATEWAY" = "192.0.2.1" ]
+WAN_TEST_SCENARIO=ecmp_later
+wan_available
+[ "$WAN_FAMILY" = "4" ] && [ "$WAN_DEVICE" = "wan4backup" ] && [ "$WAN_GATEWAY" = "192.0.2.2" ]
 WAN_TEST_SCENARIO=dual
 wan_available
 [ "$WAN_FAMILY" = "6" ] && [ "$WAN_DEVICE" = "wan6" ]
