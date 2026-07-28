@@ -12,6 +12,13 @@ READY_FILE="${CONFIG_FILE%.json}.ready"
 XRAY_BIN="$(first_type "$(config_t_get global_app xray_file)" xray)"
 [ -x "$XRAY_BIN" ] || exit 1
 
+normalize_failure_threshold() {
+	case "$1" in
+		2|3|4|5) printf '%s\n' "$1" ;;
+		*) printf '%s\n' 2 ;;
+	esac
+}
+
 load_config() {
 	json_cleanup
 	json_load "$(cat "$CONFIG_FILE")" || return 1
@@ -37,7 +44,7 @@ load_config() {
 
 	CHECK_INTERVAL=${CHECK_INTERVAL:-20}
 	CONNECT_TIMEOUT=${CONNECT_TIMEOUT:-3}
-	FAILURE_THRESHOLD=${FAILURE_THRESHOLD:-2}
+	FAILURE_THRESHOLD="$(normalize_failure_threshold "${FAILURE_THRESHOLD:-2}")"
 	MINIMUM_FAILURE_DURATION=${MINIMUM_FAILURE_DURATION:-10}
 	RECOVERY_INTERVAL=${RECOVERY_INTERVAL:-300}
 	RECOVERY_SUCCESSES=${RECOVERY_SUCCESSES:-2}

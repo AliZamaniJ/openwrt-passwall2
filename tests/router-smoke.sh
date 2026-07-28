@@ -26,6 +26,7 @@ grep -q 'max-tcp-connections=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/p
 grep -q 'max-tcp-connections=${tcp_max_connections:-20}' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/app.sh"
 grep -q 'protocol == "_failover"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
+grep -q 'failover_failure_threshold".*"range(2,5)"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'reason=probe-endpoint-failed.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'WAN_DETAIL="gateway-unreachable"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
@@ -45,8 +46,13 @@ grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/
 grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
 
 FAILOVER_SCRIPT="$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
-WAN_HELPERS="$(sed -n '/^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
-eval "$WAN_HELPERS"
+FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
+eval "$FAILOVER_HELPERS"
+[ "$(normalize_failure_threshold 1)" = "2" ]
+[ "$(normalize_failure_threshold 2)" = "2" ]
+[ "$(normalize_failure_threshold 5)" = "5" ]
+[ "$(normalize_failure_threshold 6)" = "2" ]
+[ "$(normalize_failure_threshold invalid)" = "2" ]
 ping() {
 	case "$1:$2:$3" in
 		-4:-I:wan4|-6:-I:wan6) return 0 ;;
