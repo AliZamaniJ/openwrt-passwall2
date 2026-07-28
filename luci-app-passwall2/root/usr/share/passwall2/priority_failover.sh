@@ -166,8 +166,8 @@ wan_available() {
 		fi
 	fi
 	if [ -n "$gateway" ] && ! ping -c 1 -W 1 "$gateway" >/dev/null 2>&1; then
-		WAN_DETAIL="gateway-unreachable"
-		return 1
+		WAN_DETAIL="gateway-ping-unanswered"
+		return 0
 	fi
 	WAN_DETAIL="available"
 	return 0
@@ -320,7 +320,7 @@ while true; do
 		if wan_available; then
 			if [ "$STATE_REASON" != "probe-endpoint-failed" ]; then
 				write_state "probe-endpoint-failed"
-				log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed"
+				log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 			fi
 		else
 			if [ "$STATE_REASON" != "wan-down" ]; then
@@ -398,6 +398,7 @@ while true; do
 		sleep "$CHECK_INTERVAL"
 		continue
 	fi
+	log_event "state=$STATE node=$CURRENT_ID reason=probe-endpoint-failed detail=all-candidates-failed wan_detail=$WAN_DETAIL device=${WAN_DEVICE:-unknown} gateway=${WAN_GATEWAY:-none}"
 
 	if [ "$DIRECT_FALLBACK" = "1" ]; then
 		set_main "direct" "direct" "direct-fallback" "probe-endpoint-failed"
