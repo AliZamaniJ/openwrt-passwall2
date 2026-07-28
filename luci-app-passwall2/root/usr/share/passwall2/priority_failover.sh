@@ -29,6 +29,24 @@ sanitize_probe_url() {
 			-e 's/[[:space:]]/_/g'
 }
 
+monotonic_seconds() {
+	local uptime_seconds ignored
+	read -r uptime_seconds ignored < /proc/uptime || return 1
+	uptime_seconds=${uptime_seconds%%.*}
+	case "$uptime_seconds" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$uptime_seconds"
+}
+
+elapsed_seconds() {
+	if [ "$1" -ge "$2" ]; then
+		printf '%s\n' "$(( $1 - $2 ))"
+	else
+		printf '%s\n' 0
+	fi
+}
+
 load_config() {
 	json_cleanup
 	json_load "$(cat "$CONFIG_FILE")" || return 1
@@ -82,9 +100,9 @@ get_core_pid() {
 write_state() {
 	local reason="$1"
 	STATE_REASON="$reason"
-	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s,"failure_count":%s,"first_failure_at":%s}\n' \
+	printf '{"id":"%s","state":"%s","current_id":"%s","current_tag":"%s","reason":"%s","switched_at":%s,"switched_monotonic":%s,"failure_count":%s,"first_failure_at":%s}\n' \
 		"$FAILOVER_ID" "$STATE" "$CURRENT_ID" "$CURRENT_TAG" "$reason" "$SWITCHED_AT" \
-		"${ACTIVE_FAILURES:-0}" "${FIRST_FAILURE_AT:-0}" > "$STATE_FILE"
+		"${SWITCHED_MONOTONIC:-0}" "${ACTIVE_FAILURES:-0}" "${FIRST_FAILURE_AT:-0}" > "$STATE_FILE"
 }
 
 set_main() {
@@ -95,13 +113,17 @@ set_main() {
 	local previous_id="$CURRENT_ID"
 	local previous_failures="${ACTIVE_FAILURES:-0}"
 	local failure_started="${FIRST_FAILURE_AT:-0}"
+	local switched_monotonic
+	switched_monotonic="$(monotonic_seconds)" || return 1
 	override_balancer "$MAIN_BALANCER" "$node_tag" || return 1
 	CURRENT_ID="$node_id"
 	CURRENT_TAG="$node_tag"
 	STATE="$state"
 	SWITCHED_AT="$(date +%s)"
+	SWITCHED_MONOTONIC="$switched_monotonic"
 	ACTIVE_FAILURES=0
 	FIRST_FAILURE_AT=0
+	FIRST_FAILURE_MONOTONIC=0
 	RECOVERY_COUNT=0
 	write_state "$reason"
 	log_event "state=$STATE node=$CURRENT_ID previous_node=$previous_id reason=$reason failure_count=$previous_failures first_failure_at=$failure_started"
@@ -304,11 +326,17 @@ backoff_seconds() {
 
 restore_previous_state() {
 	[ -s "$STATE_FILE" ] || return 1
-	local saved_id saved_tag saved_state saved_switched candidate
+	local saved_id saved_tag saved_state saved_switched saved_switched_monotonic now_monotonic candidate
 	saved_id="$(jsonfilter -i "$STATE_FILE" -e '@.current_id' 2>/dev/null)"
 	saved_tag="$(jsonfilter -i "$STATE_FILE" -e '@.current_tag' 2>/dev/null)"
 	saved_state="$(jsonfilter -i "$STATE_FILE" -e '@.state' 2>/dev/null)"
 	saved_switched="$(jsonfilter -i "$STATE_FILE" -e '@.switched_at' 2>/dev/null)"
+	saved_switched_monotonic="$(jsonfilter -i "$STATE_FILE" -e '@.switched_monotonic' 2>/dev/null)"
+	now_monotonic="$(monotonic_seconds)" || return 1
+	case "$saved_switched_monotonic" in
+		''|*[!0-9]*) saved_switched_monotonic="$now_monotonic" ;;
+	esac
+	[ "$saved_switched_monotonic" -le "$now_monotonic" ] || saved_switched_monotonic="$now_monotonic"
 	case "$saved_id" in
 		direct) [ "$DIRECT_FALLBACK" = "1" ] || return 1 ;;
 		blackhole) [ "$DIRECT_FALLBACK" != "1" ] || return 1 ;;
@@ -322,6 +350,7 @@ restore_previous_state() {
 	CURRENT_TAG="$saved_tag"
 	STATE=${saved_state:-backup}
 	SWITCHED_AT=${saved_switched:-$(date +%s)}
+	SWITCHED_MONOTONIC="$saved_switched_monotonic"
 	return 0
 }
 
@@ -332,10 +361,12 @@ CURRENT_ID="$PRIMARY_ID"
 CURRENT_TAG="$PRIMARY_TAG"
 STATE="primary"
 SWITCHED_AT="$(date +%s)"
+SWITCHED_MONOTONIC="$(monotonic_seconds)" || exit 1
 ACTIVE_FAILURES=0
 FIRST_FAILURE_AT=0
+FIRST_FAILURE_MONOTONIC=0
 RECOVERY_COUNT=0
-LAST_RECOVERY_CHECK=0
+LAST_RECOVERY_CHECK_MONOTONIC=0
 BACKOFF_INDEX=0
 STATE_REASON=""
 
@@ -377,6 +408,7 @@ while true; do
 		CORE_PID="$current_core_pid"
 		ACTIVE_FAILURES=0
 		FIRST_FAILURE_AT=0
+		FIRST_FAILURE_MONOTONIC=0
 		RECOVERY_COUNT=0
 		write_state "xray-recovered"
 		log_event "state=$STATE node=$CURRENT_ID reason=xray-recovered"
@@ -415,14 +447,17 @@ while true; do
 	if probe_tag "$CURRENT_ID" "$CURRENT_TAG"; then
 		ACTIVE_FAILURES=0
 		FIRST_FAILURE_AT=0
+		FIRST_FAILURE_MONOTONIC=0
 		if [ "$STATE_REASON" = "wan-down" ]; then
 			write_state "wan-recovered"
 			log_event "state=$STATE node=$CURRENT_ID reason=wan-recovered"
 		fi
 		if [ "$STATE" = "backup" ] && [ "$RESTORE_PRIMARY" != "0" ]; then
-			now="$(date +%s)"
-			if [ $((now - SWITCHED_AT)) -ge "$MINIMUM_DWELL" ] && [ $((now - LAST_RECOVERY_CHECK)) -ge "$RECOVERY_INTERVAL" ]; then
-				LAST_RECOVERY_CHECK="$now"
+			now_monotonic="$(monotonic_seconds)" || { sleep "$CHECK_INTERVAL"; continue; }
+			dwell_elapsed="$(elapsed_seconds "$now_monotonic" "$SWITCHED_MONOTONIC")"
+			recovery_elapsed="$(elapsed_seconds "$now_monotonic" "$LAST_RECOVERY_CHECK_MONOTONIC")"
+			if [ "$dwell_elapsed" -ge "$MINIMUM_DWELL" ] && [ "$recovery_elapsed" -ge "$RECOVERY_INTERVAL" ]; then
+				LAST_RECOVERY_CHECK_MONOTONIC="$now_monotonic"
 				if probe_tag "$PRIMARY_ID" "$PRIMARY_TAG"; then
 					RECOVERY_COUNT=$((RECOVERY_COUNT + 1))
 					if [ "$RECOVERY_COUNT" -ge "$RECOVERY_SUCCESSES" ]; then
@@ -437,20 +472,21 @@ while true; do
 		continue
 	fi
 
-	now="$(date +%s)"
+	now_monotonic="$(monotonic_seconds)" || { sleep 2; continue; }
 	if [ "$ACTIVE_FAILURES" -eq 0 ]; then
-		FIRST_FAILURE_AT="$now"
+		FIRST_FAILURE_AT="$(date +%s)"
+		FIRST_FAILURE_MONOTONIC="$now_monotonic"
 	fi
 	ACTIVE_FAILURES=$((ACTIVE_FAILURES + 1))
 	if [ "$ACTIVE_FAILURES" -lt "$FAILURE_THRESHOLD" ]; then
 		delay=2
-		elapsed=$((now - FIRST_FAILURE_AT))
+		elapsed="$(elapsed_seconds "$now_monotonic" "$FIRST_FAILURE_MONOTONIC")"
 		remaining=$((MINIMUM_FAILURE_DURATION - elapsed))
 		[ "$remaining" -gt "$delay" ] && delay="$remaining"
 		sleep "$delay"
 		continue
 	fi
-	elapsed=$((now - FIRST_FAILURE_AT))
+	elapsed="$(elapsed_seconds "$now_monotonic" "$FIRST_FAILURE_MONOTONIC")"
 	if [ "$elapsed" -lt "$MINIMUM_FAILURE_DURATION" ]; then
 		sleep "$((MINIMUM_FAILURE_DURATION - elapsed))"
 		continue

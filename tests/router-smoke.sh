@@ -28,6 +28,10 @@ grep -q 'protocol == "_failover"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwa
 grep -q 'minimum_failure_duration = tonumber' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_failure_threshold".*"range(2,5)"' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
 grep -q 'reason=probe-endpoint-failed.*url=$sanitized_url.*curl_exit=.*http_code=.*time_connect=.*time_tls=.*time_total=' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+grep -q 'FIRST_FAILURE_MONOTONIC' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+grep -q 'SWITCHED_MONOTONIC' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+! grep -q 'now - FIRST_FAILURE_AT' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
+! grep -q 'now - SWITCHED_AT' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 ! grep -q 'WAN_DETAIL="gateway-unreachable"' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
 grep -q '#requested_nodes < 10' "$SOURCE_ROOT/luci-app-passwall2/luasrc/passwall2/util_xray.lua"
 grep -q 'failover_backup_node' "$SOURCE_ROOT/luci-app-passwall2/luasrc/model/cbi/passwall2/client/type/ray.lua"
@@ -46,7 +50,7 @@ grep -q 'failover/SOCKS_test_node_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/
 grep -q 'failover/SOCKS_url_test_${node_id}_' "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/test.sh"
 
 FAILOVER_SCRIPT="$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh"
-FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^sanitize_probe_url()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_candidate_available()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
+FAILOVER_HELPERS="$(sed -n '/^normalize_failure_threshold()/,/^}/p; /^sanitize_probe_url()/,/^}/p; /^monotonic_seconds()/,/^}/p; /^elapsed_seconds()/,/^}/p; /^route_carrier_down()/,/^}/p; /^gateway_ping()/,/^}/p; /^wan_candidate_available()/,/^}/p; /^wan_available()/,/^}/p' "$FAILOVER_SCRIPT")"
 eval "$FAILOVER_HELPERS"
 [ "$(normalize_failure_threshold 1)" = "2" ]
 [ "$(normalize_failure_threshold 2)" = "2" ]
@@ -59,6 +63,12 @@ eval "$FAILOVER_HELPERS"
 [ "$(sanitize_probe_url 'https://example.com/health#fragment')" = "https://example.com/health" ]
 [ "$(sanitize_probe_url 'https://example.com/health')" = "https://example.com/health" ]
 [ "$(sanitize_probe_url "$(printf 'https://example.com/health\nforged')")" = "https://example.com/health_forged" ]
+MONOTONIC_NOW="$(monotonic_seconds)"
+case "$MONOTONIC_NOW" in
+	''|*[!0-9]*) false ;;
+esac
+[ "$(elapsed_seconds 110 100)" = "10" ]
+[ "$(elapsed_seconds 100 110)" = "0" ]
 ping() {
 	case "$1:$2:$3" in
 		-4:-I:wan4|-6:-I:wan6) return 0 ;;
@@ -288,7 +298,7 @@ fi
 "$XRAY_BIN" run -c "$XRAY_CONFIG" >"$WORK_DIR/xray.log" 2>&1 &
 XRAY_PID=$!
 
-FAILURE_TEST_STARTED=$(date +%s)
+FAILURE_TEST_STARTED_MONOTONIC=$(monotonic_seconds)
 "$SOURCE_ROOT/luci-app-passwall2/root/usr/share/passwall2/priority_failover.sh" "$RUNTIME_CONFIG" >"$WORK_DIR/supervisor.log" 2>&1 &
 SUPERVISOR_PID=$!
 
@@ -305,8 +315,15 @@ done
 [ "${current:-}" = "working" ]
 reason=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.reason')
 switched_at=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')
+switched_monotonic=$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_monotonic')
 [ "$reason" = "node-failed" ]
-[ $((switched_at - FAILURE_TEST_STARTED)) -ge 2 ]
+case "$switched_at" in
+	''|*[!0-9]*) false ;;
+esac
+case "$switched_monotonic" in
+	''|*[!0-9]*) false ;;
+esac
+[ $((switched_monotonic - FAILURE_TEST_STARTED_MONOTONIC)) -ge 2 ]
 code=$(/usr/bin/curl -o /dev/null -sS -L --connect-timeout 3 --max-time 6 \
 	--proxy "socks5h://127.0.0.1:${MAIN_PORT}" -w '%{http_code}' \
 	"http://127.0.0.1:$HTTP_PORT/cgi-bin/health")
@@ -335,6 +352,7 @@ done
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.state')" = "backup" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.current_id')" = "working" ]
 [ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_at')" = "$switched_at" ]
+[ "$(jsonfilter -i "${RUNTIME_CONFIG%.json}.state" -e '@.switched_monotonic')" = "$switched_monotonic" ]
 kill -0 "$SUPERVISOR_PID"
 
 echo "priority failover smoke test passed"
