@@ -132,7 +132,7 @@ set_main() {
 probe_url() {
 	local node_id="$1"
 	local url="$2"
-	local result curl_exit code remainder time_connect time_appconnect time_tls time_total sanitized_url
+	local result curl_exit code remainder time_connect time_appconnect time_total sanitized_url
 	result="$(/usr/bin/curl -o /dev/null -sS -L \
 		--connect-timeout "$CONNECT_TIMEOUT" \
 		--max-time "$((CONNECT_TIMEOUT + 3))" \
@@ -148,9 +148,8 @@ probe_url() {
 	case "$code" in
 		2??) return 0 ;;
 		*)
-			time_tls="$(awk -v appconnect="${time_appconnect:-0}" -v connect="${time_connect:-0}" 'BEGIN { duration = appconnect - connect; if (duration < 0) duration = 0; printf "%.6f", duration }')"
 			sanitized_url="$(sanitize_probe_url "$url")"
-			log_event "reason=probe-endpoint-failed node=$node_id url=$sanitized_url curl_exit=$curl_exit http_code=${code:-000} time_connect=${time_connect:-0} time_tls=${time_tls:-0} time_total=${time_total:-0}"
+			log_event "reason=probe-endpoint-failed node=$node_id url=$sanitized_url curl_exit=$curl_exit http_code=${code:-000} time_connect=${time_connect:-0} time_appconnect=${time_appconnect:-0} time_total=${time_total:-0}"
 			return 1
 			;;
 	esac
