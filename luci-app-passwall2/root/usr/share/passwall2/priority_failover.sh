@@ -22,11 +22,51 @@ normalize_failure_threshold() {
 sanitize_probe_url() {
 	printf '%s' "$1" |
 		tr '\r\n\t' '___' |
-		sed -e 's/[?#].*$//' \
-			-e 's#^\([[:alpha:]][[:alnum:]+.-]*://\)[^/]*@#\1#' \
-			-e 's#^//[^/]*@#//#' \
-			-e 's#^[^/]*@##' \
-			-e 's/[[:space:]]/_/g'
+		awk '
+			function first_delimiter(value, question, fragment) {
+				question = index(value, "?")
+				fragment = index(value, "#")
+				if (!question) return fragment
+				if (!fragment || question < fragment) return question
+				return fragment
+			}
+			function last_at(value, found, offset) {
+				offset = 0
+				while ((found = index(substr(value, offset + 1), "@")) > 0) offset += found
+				return offset
+			}
+			{
+				url = $0
+				gsub(/[[:space:]]/, "_", url)
+				prefix = ""
+				rest = url
+				if (match(rest, /^[[:alpha:]][[:alnum:]+.-]*:\/\//)) {
+					prefix = substr(rest, 1, RLENGTH)
+					rest = substr(rest, RLENGTH + 1)
+				} else if (substr(rest, 1, 2) == "//") {
+					prefix = "//"
+					rest = substr(rest, 3)
+				}
+				slash = index(rest, "/")
+				if (slash) {
+					authority = substr(rest, 1, slash - 1)
+					suffix = substr(rest, slash)
+				} else {
+					authority = rest
+					suffix = ""
+				}
+				at = last_at(authority)
+				delimiter = first_delimiter(authority)
+				if (at && delimiter && delimiter < at) {
+					print prefix "[redacted]"
+					next
+				}
+				if (at) authority = substr(authority, at + 1)
+				sanitized = prefix authority suffix
+				delimiter = first_delimiter(sanitized)
+				if (delimiter) sanitized = substr(sanitized, 1, delimiter - 1)
+				print sanitized
+			}'
 }
 
 monotonic_seconds() {
