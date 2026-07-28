@@ -301,7 +301,7 @@ if load_failover_options then -- [[ Priority failover Start ]]
 		local current = status.current_id or translate("Unknown")
 		local current_node = m.uci:get_all(appname, current)
 		if current_node then current = api.get_node_remarks(current_node) end
-		return string.format("%s: %s; %s: %s", translate("State"), status.state or translate("Unknown"), translate("Current Node"), current)
+		return string.format("%s: %s; %s: %s; %s: %s", translate("State"), status.state or translate("Unknown"), translate("Current Node"), current, translate("Reason"), status.reason or translate("Unknown"))
 	end
 
 	o = s:option(ListValue, _n("failover_primary_node"), translate("Primary Node"))
@@ -379,7 +379,8 @@ if load_failover_options then -- [[ Priority failover Start ]]
 
 	advanced_value("failover_check_interval", translate("Active check interval"), "20", "min(10)", translate("Units: seconds"))
 	advanced_value("failover_connect_timeout", translate("Connection timeout"), "3", "range(1,10)", translate("Units: seconds"))
-	advanced_value("failover_failure_threshold", translate("Failure threshold"), "2", "range(1,5)")
+	advanced_value("failover_failure_threshold", translate("Failure threshold"), "2", "range(2,5)")
+	advanced_value("failover_minimum_failure_duration", translate("Minimum failure duration"), "10", "range(0,60)", translate("The next failed probe cycle must be separated from the first failure by at least this duration.") .. "<br>" .. translate("Units: seconds"))
 	advanced_value("failover_recovery_interval", translate("Primary recovery interval"), "300", "min(60)", translate("Units: seconds"))
 	advanced_value("failover_recovery_successes", translate("Recovery success threshold"), "2", "range(1,5)")
 	advanced_value("failover_minimum_dwell", translate("Minimum backup dwell time"), "600", "min(0)", translate("Units: seconds"))
