@@ -382,7 +382,7 @@ for k, v in pairs(nodes_table) do
 	o_node.group[#o_node.group+1] = (v.group and v.group ~= "") and v.group or translate("default")
 	o_socks:value(v.id, v["remark"])
 	o_socks.group[#o_socks.group+1] = (v.group and v.group ~= "") and v.group or translate("default")
-	if v.node_type == "normal" or v.protocol == "_balancing" or v.protocol == "_urltest" then
+	if v.node_type == "normal" or v.protocol == "_balancing" or v.protocol == "_failover" or v.protocol == "_urltest" then
 		--Shunt node has its own separate options.
 		s.fields["remote_fakedns"]:depends({ node = v.id })
 	end
