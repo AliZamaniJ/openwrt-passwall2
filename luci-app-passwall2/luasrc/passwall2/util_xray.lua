@@ -1265,6 +1265,11 @@ function gen_config(var)
 			primary_tag = candidates[1].tag
 		end
 
+		local failure_threshold = tonumber(_node.failover_failure_threshold)
+		if failure_threshold ~= 2 and failure_threshold ~= 3 and failure_threshold ~= 4 and failure_threshold ~= 5 then
+			failure_threshold = 2
+		end
+
 		failover_profiles[#failover_profiles + 1] = {
 			id = failover_id,
 			xray_config_file = xray_config_file,
@@ -1279,7 +1284,8 @@ function gen_config(var)
 			restore_primary = _node.failover_restore_primary ~= "0",
 			check_interval = tonumber(_node.failover_check_interval) or 20,
 			connect_timeout = tonumber(_node.failover_connect_timeout) or 3,
-			failure_threshold = tonumber(_node.failover_failure_threshold) or 2,
+			failure_threshold = failure_threshold,
+			minimum_failure_duration = tonumber(_node.failover_minimum_failure_duration) or 10,
 			recovery_interval = tonumber(_node.failover_recovery_interval) or 300,
 			recovery_successes = tonumber(_node.failover_recovery_successes) or 2,
 			minimum_dwell = tonumber(_node.failover_minimum_dwell) or 600,
